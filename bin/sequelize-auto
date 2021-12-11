@@ -55,6 +55,10 @@ const argv = require('yargs')
     type: 'string',
     alias: 'a'
   })
+  .option('indentation', {
+    description: 'Number of spaces to indent',
+    type: 'number'
+  })
   .option('tables', {
     description: 'Space-separated names of tables to import',
     array: true,
@@ -92,6 +96,10 @@ const argv = require('yargs')
   })
   .option('noAlias', {
     description: 'Avoid creating alias `as` property in relations',
+    type: 'boolean'
+  })
+  .option('noIndexes', {
+    description: 'Prevent writing index information in the models',
     type: 'boolean'
   })
   .option('noInitModels', {
@@ -210,6 +218,8 @@ async function readPassword() {
   configFile.password = password || configFile.password || null;
   configFile.username = argv.user || configFile.username;
   configFile.useDefine = argv.useDefine || configFile.useDefine || false;
+  configFile.indentation = argv.indentation || configFile.indentation || 2;
+  configFile.noIndexes = argv.noIndexes || configFile.noIndexes || false;
 
   console.log(_.omit(configFile, 'password'));
 

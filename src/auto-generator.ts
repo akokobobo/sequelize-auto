@@ -1,7 +1,7 @@
 import _ from "lodash";
 import { ColumnDescription } from "sequelize/types";
 import { DialectOptions, FKSpec } from "./dialects/dialect-options";
-import { AutoOptions, CaseFileOption, CaseOption, Field, IndexSpec, LangOption, pluralize, qNameJoin, qNameSplit, recase, Relation, singularize, TableData, TSField } from "./types";
+import { AutoOptions, CaseFileOption, CaseOption, Field, IndexSpec, LangOption, makeIndent, makeTableName, pluralize, qNameJoin, qNameSplit, recase, Relation, singularize, TableData, TSField } from "./types";
 
 /** Generates text from each table in TableData */
 export class AutoGenerator {
@@ -24,6 +24,7 @@ export class AutoGenerator {
     schema?: string;
     singularize: boolean;
     useDefine: boolean;
+    noIndexes?: boolean;
   };
 
   constructor(tableData: TableData, dialect: DialectOptions, options: AutoOptions) {
@@ -35,16 +36,7 @@ export class AutoGenerator {
     this.dialect = dialect;
     this.options = options;
     this.options.lang = this.options.lang || 'es5';
-
-    // build the space array of indentation strings
-    let sp = '';
-    for (let x = 0; x < (this.options.indentation || 2); ++x) {
-      sp += (this.options.spaces === true ? ' ' : "\t");
-    }
-    this.space = [];
-    for (let i = 0; i < 6; i++) {
-      this.space[i] = sp.repeat(i);
-    }
+    this.space = makeIndent(this.options.spaces, this.options.indentation);
   }
 
   makeHeaderTemplate() {
@@ -69,12 +61,11 @@ export class AutoGenerator {
     } else if (this.options.lang === 'esm') {
       header += "import _sequelize from 'sequelize';\n";
       header += "const { Model, Sequelize } = _sequelize;\n\n";
+      header += "export default class #TABLE# extends Model {\n";
+      header += sp + "static init(sequelize, DataTypes) {\n";
       if (this.options.useDefine) {
-        header += "export default function(sequelize, DataTypes) {\n";
         header += sp + "return sequelize.define('#TABLE#', {\n";
       } else {
-        header += "export default class #TABLE# extends Model {\n";
-        header += sp + "static init(sequelize, DataTypes) {\n";
         header += sp + "return super.init({\n";
       }
     } else {
@@ -94,7 +85,7 @@ export class AutoGenerator {
     tableNames.forEach(table => {
       let str = header;
       const [schemaName, tableNameOrig] = qNameSplit(table);
-      const tableName = recase(this.options.caseModel, tableNameOrig, this.options.singularize);
+      const tableName = makeTableName(this.options.caseModel, tableNameOrig, this.options.singularize, this.options.lang);
 
       if (this.options.lang === 'ts') {
         const associations = this.addTypeScriptAssociationMixins(table);
@@ -133,7 +124,7 @@ export class AutoGenerator {
         str += "\n" + this.space[1] + "static initModel(sequelize: Sequelize.Sequelize): typeof #TABLE# {\n";
 
         if (this.options.useDefine) {
-          str += this.space[2] + "return sequelize.define('#TABLE#',{\n";
+          str += this.space[2] + "return sequelize.define('#TABLE#', {\n";
 
         } else {
           str += this.space[2] + "return #TABLE#.init({\n";
@@ -173,7 +164,6 @@ export class AutoGenerator {
   private addTable(table: string) {
 
     const [schemaName, tableNameOrig] = qNameSplit(table);
-    const tableName = recase(this.options.caseModel, tableNameOrig, this.options.singularize);
     const space = this.space;
     let timestamps = (this.options.additional && this.options.additional.timestamps === true) || false;
     let paranoid = (this.options.additional && this.options.additional.paranoid === true) || false;
@@ -231,7 +221,9 @@ export class AutoGenerator {
     }
 
     // add indexes
-    str += this.addIndexes(table);
+    if (!this.options.noIndexes) {
+      str += this.addIndexes(table);
+    }
 
     str = space[2] + str.trim();
     str = str.substring(0, str.length - 1);
@@ -406,7 +398,7 @@ export class AutoGenerator {
 
         str += space[3] + attr + ": " + val_text;
 
-      } else if (attr === "comment" && !fieldObj[attr]) {
+      } else if (attr === "comment" && (!fieldObj[attr] || this.dialect.name === "mssql")) {
         return true;
       } else {
         let val = (attr !== "type") ? null : this.getSqType(fieldObj, attr);
@@ -426,11 +418,7 @@ export class AutoGenerator {
     }
 
     if (field !== fieldName) {
-      // write the original fieldname, unless it is a key and the column names are case-insensitive
-      // because Sequelize may request the same column twice in a join condition otherwise.
-      if (!fieldObj.primaryKey || this.dialect.canAliasPK || field.toUpperCase() !== fieldName.toUpperCase()) {
-        str += space[3] + "field: '" + field + "',\n";
-      }
+      str += space[3] + "field: '" + field + "',\n";
     }
 
     // removes the last `,` within the attribute options
@@ -531,7 +519,7 @@ export class AutoGenerator {
       val = 'DataTypes.TEXT' + (!_.isNull(length) ? length : '');
     } else if (type === "date") {
       val = 'DataTypes.DATEONLY';
-    } else if (type.match(/^(date|timestamp)/)) {
+    } else if (type.match(/^(date|timestamp|year)/)) {
       val = 'DataTypes.DATE' + (!_.isNull(length) ? length : '');
     } else if (type.match(/^(time)/)) {
       val = 'DataTypes.TIME';
@@ -592,7 +580,8 @@ export class AutoGenerator {
     const fields = _.keys(this.tables[table]);
     return fields.filter((field): boolean => {
       const fieldObj = this.tables[table][field];
-      return fieldObj.allowNull || (!!fieldObj.defaultValue || fieldObj.defaultValue === "") || fieldObj.primaryKey;
+      return fieldObj.allowNull || (!!fieldObj.defaultValue || fieldObj.defaultValue === "") || fieldObj.autoIncrement
+        || this.isTimestampField(field);
     });
   }
 
@@ -640,7 +629,7 @@ export class AutoGenerator {
             str += `${sp}${rel.childProp}!: ${rel.childModel};\n`;
             str += `${sp}get${pchild}!: Sequelize.HasOneGetAssociationMixin<${rel.childModel}>;\n`;
             str += `${sp}set${pchild}!: Sequelize.HasOneSetAssociationMixin<${rel.childModel}, ${rel.childModel}Id>;\n`;
-            str += `${sp}create${pchild}!: Sequelize.HasOneCreateAssociationMixin<${rel.childModel}CreationAttributes>;\n`;
+            str += `${sp}create${pchild}!: Sequelize.HasOneCreateAssociationMixin<${rel.childModel}>;\n`;
             needed[rel.childTable].add(rel.childModel);
             needed[rel.childTable].add(`${rel.childModel}Id`);
             needed[rel.childTable].add(`${rel.childModel}CreationAttributes`);
@@ -769,8 +758,8 @@ export class AutoGenerator {
     if (additional.timestamps === false) {
       return false;
     }
-    return ((!additional.createdAt && field.toLowerCase() === 'createdat') || additional.createdAt === field)
-      || ((!additional.updatedAt && field.toLowerCase() === 'updatedat') || additional.updatedAt === field);
+    return ((!additional.createdAt && recase('c', field) === 'createdAt') || additional.createdAt === field)
+      || ((!additional.updatedAt && recase('c', field) === 'updatedAt') || additional.updatedAt === field);
   }
 
   private isParanoidField(field: string) {
@@ -778,7 +767,7 @@ export class AutoGenerator {
     if (additional.timestamps === false || additional.paranoid === false) {
       return false;
     }
-    return ((!additional.deletedAt && field.toLowerCase() === 'deletedat') || additional.deletedAt === field);
+    return ((!additional.deletedAt && recase('c', field) === 'deletedAt') || additional.deletedAt === field);
   }
 
   private isIgnoredField(field: string) {
